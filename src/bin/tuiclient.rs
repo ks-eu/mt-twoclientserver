@@ -1,7 +1,8 @@
 use std::thread;
 use std::sync::mpsc;
 use std::collections::VecDeque;
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Write};
+use std::net::TcpStream;
 
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent},
@@ -18,6 +19,7 @@ fn add_message(history: &mut VecDeque<String>, message: String) {
 }
 
 enum InputEvent {
+    Message(String),
     KeyStroke(char),
     BackSpace,
     Send,
@@ -31,6 +33,27 @@ fn main() -> io::Result<()> {
     io::stdout().flush().expect("failed to clear screen");
 
     let (sender, receiver) = mpsc::channel::<InputEvent>();
+    let mut stream = TcpStream::connect("127.0.0.1:7878")?;
+    
+    let read_stream = stream.try_clone()?;
+    let tcp_send = sender.clone();
+    thread::spawn(move || {
+        let buf_reader = BufReader::new(read_stream);
+        for line in buf_reader.lines() {
+            match line {
+                Ok(msg) => {
+                    if msg.is_empty() {
+                        continue;
+                    }
+                    let _ = tcp_send.send(InputEvent::Message(msg));
+                }
+                Err(e) => {
+                    let _ = tcp_send.send(InputEvent::Error(e.to_string()));
+                    break;
+                }
+            }
+        }
+    });
 
     let input_send = sender.clone();
     thread::spawn(move || {
@@ -56,7 +79,7 @@ fn main() -> io::Result<()> {
             }
         }
     });
-    
+
     let mut history: VecDeque<String> = VecDeque::with_capacity(HISTORY_CAPACITY);
     let mut input = String::new();
 
@@ -84,7 +107,12 @@ fn main() -> io::Result<()> {
             }
             Ok(InputEvent::Send) => {
                 add_message(&mut history, format!("You> {}", input.trim()));
+                stream.write_all(input.trim().as_bytes())?;
+                stream.write_all(b"\n")?;
                 input.clear();
+            }
+            Ok(InputEvent::Message(msg)) => {
+                add_message(&mut history, format!("Friend> {}", msg.trim()));
             }
             Ok(InputEvent::Exit) => {
                 break;
